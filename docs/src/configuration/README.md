@@ -37,7 +37,7 @@ static_gamma = 100       # Gamma percentage for static mode (10-200%)
 #[Clock-based transitions]
 sunset = "19:00:00"      # Sunset time for clock-based modes (HH:MM:SS)
 sunrise = "06:00:00"     # Sunrise time for clock-based modes (HH:MM:SS)
-transition_duration = 45 # Transition duration in minutes (5-120)
+transition_duration = 45 # Transition duration in minutes (5-240)
 
 #[Geolocation]
 latitude = 30.267153     # Geographic latitude (auto-detected on first run)
