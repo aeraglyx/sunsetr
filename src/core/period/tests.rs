@@ -92,11 +92,11 @@ fn test_extreme_short_transition() {
 
 #[test]
 fn test_extreme_long_transition() {
-    let config = create_test_config("19:00:00", "06:00:00", "finish_by", 120); // 2 hours
+    let config = create_test_config("20:00:00", "06:00:00", "finish_by", 240); // 4 hours
     let (sunset_start, sunset_end, _, _) = calculate_transition_windows(&config);
 
-    assert_eq!(sunset_start, NaiveTime::from_hms_opt(17, 0, 0).unwrap());
-    assert_eq!(sunset_end, NaiveTime::from_hms_opt(19, 0, 0).unwrap());
+    assert_eq!(sunset_start, NaiveTime::from_hms_opt(16, 0, 0).unwrap());
+    assert_eq!(sunset_end, NaiveTime::from_hms_opt(20, 0, 0).unwrap());
 }
 
 #[test]

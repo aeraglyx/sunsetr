@@ -47,7 +47,7 @@ For `finish_by`, `start_at`, and `center` modes, configure these settings:
 ```toml
 sunset = "19:00:00"           # HH:MM:SS format
 sunrise = "06:00:00"          # HH:MM:SS format
-transition_duration = 45      # Minutes (5-120)
+transition_duration = 45      # Minutes (5-240)
 ```
 
 ### 2. `finish_by` (Complete By Time)
