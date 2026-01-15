@@ -42,6 +42,13 @@ struct Rgb {
     b: f64,
 }
 
+/// XY chromaticity representation
+#[derive(Debug, Clone, Copy)]
+struct Xy {
+    x: f64,
+    y: f64,
+}
+
 /// XYZ color space representation
 #[derive(Debug, Clone, Copy)]
 struct Xyz {
@@ -51,13 +58,19 @@ struct Xyz {
 }
 
 /// Clamp value to 0.0-1.0 range
-fn clamp(value: f64) -> f64 {
-    value.clamp(0.0, 1.0)
+// fn clamp(value: f64) -> f64 {
+//     value.clamp(0.0, 1.0)
+// }
+
+fn oetf_gamma_22(value: f64) -> f64 {
+    value.powf(1.0 / 2.2)
 }
 
-/// Apply sRGB gamma correction
-/// Based on: https://en.wikipedia.org/wiki/SRGB
-fn srgb_gamma(value: f64) -> f64 {
+fn oetf_gamma_26(value: f64) -> f64 {
+    value.powf(1.0 / 2.6)
+}
+
+fn oetf_srgb(value: f64) -> f64 {
     if value <= 0.0031308 {
         12.92 * value
     } else {
@@ -65,24 +78,87 @@ fn srgb_gamma(value: f64) -> f64 {
     }
 }
 
-/// Convert XYZ color space to sRGB using standard transformation matrix
-/// Reference: http://www.brucelindbloom.com/index.html?Eqn_RGB_XYZ_Matrix.html
-fn xyz_to_srgb(xyz: &Xyz) -> Rgb {
-    Rgb {
-        r: srgb_gamma(
-            clamp(3.2404542 * xyz.x - 1.5371385 * xyz.y - 0.4985314 * xyz.z),
-        ),
-        g: srgb_gamma(
-            clamp(-0.9692660 * xyz.x + 1.8760108 * xyz.y + 0.0415560 * xyz.z),
-        ),
-        b: srgb_gamma(
-            clamp(0.0556434 * xyz.x - 0.2040259 * xyz.y + 1.0572252 * xyz.z),
-        ),
+fn oetf_rec2020(value: f64) -> f64 {
+    if value < 0.018 {
+        4.5 * value
+    } else {
+        1.099 * value.powf(0.45) - 0.099
     }
 }
 
+/// Apply opto-electronic transfer function
+/// https://en.wikipedia.org/wiki/Transfer_functions_in_imaging
+fn apply_oetf(rgb: &mut Rgb, oetf: fn(f64) -> f64) {
+    rgb.r = oetf(rgb.r);
+    rgb.g = oetf(rgb.g);
+    rgb.b = oetf(rgb.b);
+}
+
+/// https://wiki.hypr.land/Configuring/Monitors/#color-management-presets
+/// Reference: http://www.brucelindbloom.com/index.html?Eqn_RGB_XYZ_Matrix.html
+const MATRIX_XYZ_TO_REC709: [f64; 9] = [
+    3.2404542, -1.5371385, -0.4985314,
+    -0.9692660, 1.8760108, 0.0415560,
+    0.0556434, -0.2040259, 1.0572252,
+];
+
+const MATRIX_XYZ_TO_REC2020: [f64; 9] = [
+    1.4628067, -0.1840623, -0.2743606,
+    -0.5217933, 1.4472381, 0.0677227,
+    0.0349342, -0.0968930, 1.2884099,
+];
+
+const MATRIX_XYZ_TO_P3: [f64; 9] = [
+    2.7253940, -1.01800301, -0.4401631,
+    -0.7951680, 1.6897321, 0.0226472,
+    0.0412419, -0.0876390, 1.1009294,
+];
+
+const MATRIX_XYZ_TO_ADOBE: [f64; 9] = [
+    2.0413690, -0.5649464, -0.3446944,
+    -0.9692660, 1.8760108, 0.0415560,
+    0.0134474, -0.1183897, 1.0154096,
+];
+
+fn linear_transformation(xyz: &Xyz, m: [f64; 9]) -> Rgb {
+    Rgb {
+        r: m[0] * xyz.x + m[1] * xyz.y + m[2] * xyz.z,
+        g: m[3] * xyz.x + m[4] * xyz.y + m[5] * xyz.z,
+        b: m[6] * xyz.x + m[7] * xyz.y + m[8] * xyz.z,
+    }
+}
+
+/// Convert XYZ color space to RGB using standard transformation matrix
+/// Reference: http://www.brucelindbloom.com/index.html?Eqn_RGB_XYZ_Matrix.html
+fn xyz_to_rbg(xyz: &Xyz, gamut: &Gamut) -> Rgb {
+    let matrix = match gamut {
+        Gamut::Rec709 => MATRIX_XYZ_TO_REC709,
+        Gamut::Rec2020 => MATRIX_XYZ_TO_REC2020,
+        Gamut::P3 => MATRIX_XYZ_TO_P3,
+        Gamut::Adobe => MATRIX_XYZ_TO_ADOBE,
+    };
+    linear_transformation(xyz, matrix)
+}
+
+/// Reference: https://iquilezles.org/articles/smin/
+fn smooth_min(a: f64, b: f64, falloff: f64) -> f64 {
+    let k = 6.0 * falloff;
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.min(b) - k * h * h * h / 6.0
+}
+
+fn smooth_max(a: f64, b: f64, falloff: f64) -> f64 {
+    -smooth_min(-a, -b, falloff)
+}
+
+fn gamut_compression(rgb: &mut Rgb, falloff: f64) {
+    rgb.r = smooth_max(rgb.r, 0.0, falloff).min(1.0);
+    rgb.g = smooth_max(rgb.g, 0.0, falloff).min(1.0);
+    rgb.b = smooth_max(rgb.b, 0.0, falloff).min(1.0);
+}
+
 /// Normalize RGB so the maximum component is 1.0
-fn srgb_normalize(rgb: &mut Rgb) {
+fn rgb_normalize(rgb: &mut Rgb) {
     let max_component = rgb.r.max(rgb.g.max(rgb.b));
     if max_component > 0.0 {
         rgb.r /= max_component;
@@ -91,27 +167,16 @@ fn srgb_normalize(rgb: &mut Rgb) {
     }
 }
 
-/// Calculate illuminant D chromaticity coordinates
-///
-/// Illuminant D (daylight locus) describes natural daylight as we perceive it.
-/// This is how we expect bright, cold white light sources to look.
-/// Valid range: 2500K to 25000K (though we stretch it a bit for transitions)
-///
-/// Reference: https://en.wikipedia.org/wiki/Standard_illuminant#Illuminant_series_D
-fn illuminant_d(temp: i32) -> Result<(f64, f64), &'static str> {
-    let temp_f = temp as f64;
+/// Multiply RGB component-wise
+fn rgb_brightness(rgb: &mut Rgb, brightness: f64) {
+    rgb.r *= brightness;
+    rgb.g *= brightness;
+    rgb.b *= brightness;
+}
 
-    let x = if (2500..=7000).contains(&temp) {
-        0.244063 + 0.09911e3 / temp_f + 2.9678e6 / temp_f.powi(2) - 4.6070e9 / temp_f.powi(3)
-    } else if temp > 7000 && temp <= 25000 {
-        0.237040 + 0.24748e3 / temp_f + 1.9018e6 / temp_f.powi(2) - 2.0064e9 / temp_f.powi(3)
-    } else {
-        return Err("Temperature out of range for illuminant D");
-    };
-
-    let y = (-3.0 * x.powi(2)) + (2.870 * x) - 0.275;
-
-    Ok((x, y))
+/// Laurent polynomial function going from power of -3 to 3
+fn temp_to_chroma_fit_curve(x: f64, c: [f64; 7]) -> f64 {
+    (0..6).rev().fold(c[6], |total, i| total * x + c[i]) / (x * x * x)
 }
 
 /// Calculate Planckian locus chromaticity coordinates
@@ -119,74 +184,96 @@ fn illuminant_d(temp: i32) -> Result<(f64, f64), &'static str> {
 /// Planckian locus (black body locus) describes the color of a black body
 /// at a certain temperature directly at its source. This is how we expect
 /// dim, warm light sources (like incandescent bulbs) to look.
-/// Valid range: 1667K to 25000K
+/// Valid range: 1000 to 20000K
 ///
 /// Reference: https://en.wikipedia.org/wiki/Planckian_locus#Approximation
-fn planckian_locus(temp: i32) -> Result<(f64, f64), &'static str> {
-    let temp_f = temp as f64;
+fn temperature_to_chroma(temp: f64) -> Xy {
+    const COEFFS_X: [f64; 7] = [
+        4.60243e+08, -1.34958e+06, 1.49958e+03, 2.20742e-02, 1.86755e-05, -7.48912e-10, 1.12218e-14
+    ];
+    const COEFFS_Y: [f64; 7] = [
+        8.19188e-02, -1.32154e+00, 8.63682e+00, -2.95048e+01, 5.67579e+01, -5.42917e+01, 1.98083e+01
+    ];
 
-    let (x, y) = if (1667..=4000).contains(&temp) {
-        let x = -0.2661239e9 / temp_f.powi(3) - 0.2343589e6 / temp_f.powi(2)
-            + 0.8776956e3 / temp_f
-            + 0.179910;
+    let chroma_x = temp_to_chroma_fit_curve(temp, COEFFS_X);
+    let chroma_y = temp_to_chroma_fit_curve(chroma_x, COEFFS_Y);
 
-        let y = if temp <= 2222 {
-            -1.1064814 * x.powi(3) - 1.34811020 * x.powi(2) + 2.18555832 * x - 0.20219683
-        } else {
-            -0.9549476 * x.powi(3) - 1.37418593 * x.powi(2) + 2.09137015 * x - 0.16748867
-        };
-
-        (x, y)
-    } else if temp > 4000 && temp < 25000 {
-        let x = -3.0258469e9 / temp_f.powi(3)
-            + 2.1070379e6 / temp_f.powi(2)
-            + 0.2226347e3 / temp_f
-            + 0.240390;
-
-        let y = 3.0817580 * x.powi(3) - 5.87338670 * x.powi(2) + 3.75112997 * x - 0.37001483;
-
-        (x, y)
-    } else {
-        return Err("Temperature out of range for planckian locus");
-    };
-
-    Ok((x, y))
+    Xy {x: chroma_x, y: chroma_y}
 }
 
-/// Calculate RGB using Tanner Helland's algorithm
-/// This algorithm is used to extend the range of sunsetr's color science below the minimum of the Planckian
-/// locus to match hyprsunset's capabilities, interpolating color temperature betwen 1667K and 1000K.
-///
-/// Reference: https://tannerhelland.com/2012/09/18/convert-temperature-rgb-algorithm-code.html
-fn tanner_helland_rgb(temp: u32) -> (f32, f32, f32) {
-    let temp_hundreds = (temp / 100) as f32;
+/// https://en.wikipedia.org/wiki/Smoothstep
+fn smoothstep(x: f64) -> f64 {
+    let x = x.clamp(0.0, 1.0);
+    3.0 * x.powi(2) - 2.0 * x.powi(3)
+}
 
-    let (r, g, b) = if temp_hundreds <= 66.0 {
-        let r = 255.0;
-        let g = if temp_hundreds <= 1.0 {
-            0.0
-        } else {
-            (99.4708 * temp_hundreds.ln() - 161.11957).clamp(0.0, 255.0)
-        };
-        let b = if temp_hundreds <= 19.0 {
-            0.0
-        } else {
-            let temp_minus_10 = temp_hundreds - 10.0;
-            if temp_minus_10 <= 0.0 {
-                0.0
-            } else {
-                (temp_minus_10.ln() * 138.51773 - 305.0448).clamp(0.0, 255.0)
-            }
-        };
-        (r, g, b)
-    } else {
-        let r = (329.69873 * (temp_hundreds - 60.0).powf(-0.13320476)).clamp(0.0, 255.0);
-        let g = (288.12216 * (temp_hundreds - 60.0).powf(-0.07551485)).clamp(0.0, 255.0);
-        let b = 255.0;
-        (r, g, b)
-    };
+/// Convert temperature from Kelvins to Mireds
+fn k_to_mired(kelvin: u32) -> u32 {
+    1000000 / kelvin
+}
 
-    (r / 255.0, g / 255.0, b / 255.0)
+enum ColorSpace {
+    SRGB,
+    Wide,
+    DP3,
+    DciP3,
+    Adobe,
+}
+
+enum Gamut {
+    Rec709,
+    Rec2020,
+    P3,
+    Adobe,
+}
+
+enum Illuminant {
+    D63,
+    D65,
+}
+
+fn get_oetf(color_space: &ColorSpace) -> fn(f64) -> f64 {
+    match color_space {
+        ColorSpace::SRGB => oetf_srgb,
+        ColorSpace::Wide => oetf_rec2020,
+        ColorSpace::DciP3 => oetf_gamma_26,
+        ColorSpace::DP3 => oetf_srgb,
+        ColorSpace::Adobe => oetf_gamma_22,
+    }
+}
+
+fn get_illuminant(color_space: &ColorSpace) -> Illuminant {
+    match color_space {
+        ColorSpace::SRGB => Illuminant::D65,
+        ColorSpace::Wide => Illuminant::D65,
+        ColorSpace::DciP3 => Illuminant::D63,
+        ColorSpace::DP3 => Illuminant::D65,
+        ColorSpace::Adobe => Illuminant::D65,
+    }
+}
+
+fn get_gamut(color_space: &ColorSpace) -> Gamut {
+    match color_space {
+        ColorSpace::SRGB => Gamut::Rec709,
+        ColorSpace::Wide => Gamut::Rec2020,
+        ColorSpace::DciP3 => Gamut::P3,
+        ColorSpace::DP3 => Gamut::P3,
+        ColorSpace::Adobe => Gamut::Adobe,
+    }
+}
+
+fn get_wp_cct(illuminant: &Illuminant) -> u32 {
+    match illuminant {
+        Illuminant::D63 => 6300,
+        Illuminant::D65 => 6500,
+    }
+}
+
+fn get_wp_chroma(illuminant: &Illuminant) -> Xy {
+    match illuminant {
+        Illuminant::D63 => Xy { x: 0.3140, y: 0.3510 },
+        Illuminant::D65 => Xy { x: 0.3127, y: 0.3290 },
+    }
 }
 
 /// Calculate white point RGB values for a given color temperature
@@ -199,58 +286,57 @@ fn tanner_helland_rgb(temp: u32) -> (f32, f32, f32) {
 /// The algorithm smoothly transitions between planckian locus and illuminant D
 /// in the 2500K-4000K range to provide subjectively pleasant colors and uses
 /// Tanner Helland's method to extend the range down from 1667K to 1000K.
-pub fn temperature_to_rgb(temp: u32) -> (f32, f32, f32) {
-    let temp = temp as i32;
+pub fn temperature_to_rgb(temp: u32, brightness: f64) -> (f32, f32, f32) {
+    // TODO: pass color space
+    let color_space = ColorSpace::SRGB;
+    let illuminant = get_illuminant(&color_space);
 
-    // D65 standard (6500K) is pure white
-    if temp == 6500 {
-        return (1.0, 1.0, 1.0);
-    }
+    let expected_wp_temp = get_wp_cct(&illuminant);
+    let expected_wp_chroma = get_wp_chroma(&illuminant);
 
-    // Calculate chromaticity coordinates based on temperature range
-    let (wp_x, wp_y) = if temp >= 25000 {
-        // Very high temperatures: use illuminant D at 25000K
-        illuminant_d(25000).unwrap_or((0.31, 0.33))
-    } else if temp >= 4000 {
-        // High temperatures (4000K+): use illuminant D
-        illuminant_d(temp).unwrap_or((0.31, 0.33))
-    } else if temp >= 2500 {
-        // Medium temperatures (2500K-4000K): smooth transition between curves
-        let (x1, y1) = illuminant_d(temp).unwrap_or((0.31, 0.33));
-        let (x2, y2) = planckian_locus(temp).unwrap_or((0.45, 0.41));
+    // if temp == expected_wp_temp {
+    //     return (1.0, 1.0, 1.0);
+    // }
 
-        // Cosine interpolation factor for smooth transition
-        let factor = (4000.0 - temp as f64) / 1500.0;
-        let sine_factor = ((std::f64::consts::PI * factor).cos() + 1.0) / 2.0;
+    let chroma_at_wp = temperature_to_chroma(expected_wp_temp as f64);
+    let chroma_at_temp = temperature_to_chroma(temp as f64);
 
-        let wp_x = x1 * sine_factor + x2 * (1.0 - sine_factor);
-        let wp_y = y1 * sine_factor + y2 * (1.0 - sine_factor);
+    // Offset the locus so it intersects the monitor's whitepoint exactly.
+    // That way, when a user sets 5000K on a D50 monitor, they'll get "true white"
+    // but different temperatures will blend into the Planckian locus.
+    const FALLOFF: f64 = 150.0;
+    let offset_weight = smoothstep(
+        1.0 - k_to_mired(temp).abs_diff(k_to_mired(expected_wp_temp)) as f64 / FALLOFF
+    );
 
-        (wp_x, wp_y)
-    } else if temp >= 1667 {
-        // Low temperatures: use planckian locus (valid range)
-        planckian_locus(temp).unwrap_or((0.45, 0.41))
-    } else {
-        // Very low temperatures (< 1667K): use Tanner Helland algorithm
-        // Convert to RGB directly (skip XYZ transformation)
-        let (r, g, b) = tanner_helland_rgb(temp as u32);
-
-        // Return directly - Tanner Helland already normalized
-        // We need to exit early here since we're skipping XYZ conversion
-        return (r, g, b);
+    // Construct chromaticity coordinates
+    let wp = Xy {
+        x: chroma_at_temp.x + offset_weight * (expected_wp_chroma.x - chroma_at_wp.x),
+        y: chroma_at_temp.y + offset_weight * (expected_wp_chroma.y - chroma_at_wp.y),
     };
 
     // Convert chromaticity coordinates to XYZ
-    let wp_z = 1.0 - wp_x - wp_y;
+    let wp_z = 1.0 - wp.x - wp.y;
     let xyz = Xyz {
-        x: wp_x,
-        y: wp_y,
+        x: wp.x,
+        y: wp.y,
         z: wp_z,
     };
 
-    // Convert XYZ to sRGB and normalize
-    let mut rgb = xyz_to_srgb(&xyz);
-    srgb_normalize(&mut rgb);
+    // Convert XYZ to RGB
+    let gamut = get_gamut(&color_space);
+    let mut rgb = xyz_to_rbg(&xyz, &gamut);
+
+    // Normalize and apply brightness
+    rgb_normalize(&mut rgb);
+    rgb_brightness(&mut rgb, brightness.powi(3));
+
+    // Compress gamut for softer falloff at the gamut boundary
+    gamut_compression(&mut rgb, 0.005);
+
+    // Apply Opto-Electronic Transfer Function to compensate for compositor limitations
+    let oetf = get_oetf(&color_space);
+    apply_oetf(&mut rgb, oetf);
 
     // Return as f32 for compatibility with existing code
     (rgb.r as f32, rgb.g as f32, rgb.b as f32)
@@ -267,7 +353,7 @@ pub fn temperature_to_rgb(temp: u32) -> (f32, f32, f32) {
 /// # Returns
 /// Tuple of (red_factor, green_factor, blue_factor) rounded to 3 decimal places
 pub fn get_rgb_factors(temperature: u32) -> (f32, f32, f32) {
-    let (r, g, b) = temperature_to_rgb(temperature);
+    let (r, g, b) = temperature_to_rgb(temperature, 1.0);
     // Round to 3 decimal places for cleaner logging
     (
         (r * 1000.0).round() / 1000.0,
@@ -296,8 +382,7 @@ pub fn generate_gamma_table(size: usize, color_factor: f64, gamma: f64) -> Vec<u
         let val = i as f64 / (size - 1) as f64;
 
         // Apply color temperature factor and gamma curve using power function
-        // This matches wlsunset's formula: pow(val * color_factor, 1.0 / gamma)
-        let output = ((val * color_factor).powf(1.0 / gamma) * 65535.0).clamp(0.0, 65535.0);
+        let output = (val * color_factor * 65535.0).clamp(0.0, 65535.0);
 
         table.push(output as u16);
     }
@@ -325,7 +410,7 @@ pub fn create_gamma_tables(
     debug_enabled: bool,
 ) -> Result<Vec<u8>> {
     // Convert temperature to RGB factors
-    let (red_factor, green_factor, blue_factor) = temperature_to_rgb(temperature);
+    let (red_factor, green_factor, blue_factor) = temperature_to_rgb(temperature, gamma_percent as f64 / 100.0);
 
     // Generate individual channel tables using power function gamma curves
     let red_table = generate_gamma_table(size, red_factor as f64, gamma_percent as f64);
@@ -374,7 +459,8 @@ mod tests {
 
     #[test]
     fn test_temperature_to_rgb_daylight() {
-        let (r, g, b) = temperature_to_rgb(6500);
+        // TODO: potencially incorrect for different illuminants
+        let (r, g, b) = temperature_to_rgb(6500, 1.0);
         // Daylight should be neutral
         assert!((r - 1.0).abs() < 0.01);
         assert!((g - 1.0).abs() < 0.01);
@@ -383,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_temperature_to_rgb_warm() {
-        let (r, g, b) = temperature_to_rgb(3300);
+        let (r, g, b) = temperature_to_rgb(3300, 1.0);
         // Warm light should be red-heavy, blue-light
         assert!(r > g);
         assert!(g > b);
@@ -392,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_temperature_to_rgb_cool() {
-        let (r, g, b) = temperature_to_rgb(8000);
+        let (r, g, b) = temperature_to_rgb(8000, 1.0);
         // Cool light should be blue-heavy
         assert!(b > g);
         assert!(r < b);
