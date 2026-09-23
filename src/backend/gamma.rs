@@ -38,6 +38,19 @@ fn xyz_to_rgb(xyz: Xyz, matrix: [f64; 9]) -> Rgb {
     ]
 }
 
+/// Adapted from cubic polynomial smooth-minimum by Inigo Quilez
+/// Reference: <https://iquilezles.org/articles/smin/>
+fn smooth_max(a: f64, b: f64, falloff: f64) -> f64 {
+    let k = 6.0 * falloff;
+    let h = (k - (a - b).abs()).max(0.0) / k;
+    a.max(b) + k * h.powi(3) / 6.0
+}
+
+/// Compress gamut for softer falloff at the gamut boundary
+fn gamut_compression(rgb: Rgb, falloff: f64) -> Rgb {
+    rgb.map(|x| smooth_max(x, 0.0, falloff))
+}
+
 /// Normalize RGB so the maximum component is 1.0
 fn rgb_normalize(rgb: Rgb) -> Rgb {
     let max = rgb[0].max(rgb[1].max(rgb[2]));
@@ -129,6 +142,7 @@ fn temperature_to_rgb(temp: u32) -> Rgb {
     let mut rgb = xyz_to_rgb(xyz, MATRIX_XYZ_TO_REC709);
 
     rgb = rgb_normalize(rgb);
+    rgb = gamut_compression(rgb, 0.005);
 
     rgb
 }
